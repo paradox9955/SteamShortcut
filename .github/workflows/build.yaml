@@ -1,4 +1,4 @@
-﻿on:
+on:
   workflow_dispatch:
 
 env:
@@ -8,69 +8,97 @@ env:
 jobs:
   build-and-release:
     runs-on: windows-latest
+
     permissions:
       contents: write
+
     steps:
-      - uses: actions/checkout@v2
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Setup .NET
-        uses: actions/setup-dotnet@v1
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
+
       - name: Install dependencies
         run: dotnet restore
-      - name: Set initial RELEASE_VERSION
+
+      - name: Set release version
         shell: bash
         run: |
-          majorMinor=$(cat VERSION | tr -d '[:space:]')
+          majorMinor=$(tr -d '[:space:]' < VERSION)
 
-          if [ -z "$(git tag --list)" ]; then
+          if ! git tag --list "${majorMinor}.*" | grep -q .; then
             nextVer="${majorMinor}.1"
           else
-            lastVer=$(git tag --sort=-v:refname --list "${majorMinor}.*" | head -n1)
-            if [ -z "$lastVer" ]; then
-              nextVer="${majorMinor}.1"
+            lastVer=$(git tag --list "${majorMinor}.*" --sort=-v:refname | head -n1)
+
+            if [[ "$lastVer" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              nextPatch=$((10#${BASH_REMATCH[3]} + 1))
+              nextVer="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$nextPatch"
             else
-              IFS='.' read -ra parts <<< "$lastVer"
-              nextPatch=$((parts[2] + 1))
-              nextVer="${parts[0]}.${parts[1]}.$nextPatch"
+              echo "::error::Invalid version tag: $lastVer"
+              exit 1
             fi
           fi
 
-          echo "RELEASE_VERSION=$nextVer" >> $GITHUB_ENV
-          echo "Using version: \"$nextVer\""
+          echo "RELEASE_VERSION=$nextVer" >> "$GITHUB_ENV"
+          echo "Using version: $nextVer"
+
       - name: Validate variables
         shell: bash
         run: |
-          echo "RELEASE_VERSION: ${{ env.RELEASE_VERSION }}"
-          echo "RELEASE_NAME: ${{ env.RELEASE_NAME }}"
-          if [ -z "${{ env.RELEASE_VERSION }}" ]; then
+          echo "RELEASE_VERSION: $RELEASE_VERSION"
+          echo "RELEASE_NAME: $RELEASE_NAME"
+
+          if [ -z "$RELEASE_VERSION" ]; then
             echo "::error::RELEASE_VERSION is empty"
             exit 1
           fi
+
       - name: Normalize version
         shell: bash
         run: |
-          clean_version=$(echo "${{ env.RELEASE_VERSION }}" | tr -d '[:space:]')
-          echo "RELEASE_VERSION=${clean_version}" >> $GITHUB_ENV
+          clean_version=$(echo "$RELEASE_VERSION" | tr -d '[:space:]')
+          echo "RELEASE_VERSION=$clean_version" >> "$GITHUB_ENV"
+
       - name: Build Release
         shell: pwsh
         run: |
-          $version = "${{ env.RELEASE_VERSION }}"
-          dotnet publish SteamShortcut/SteamShortcut.csproj -p:PublishSingleFile=true --self-contained false --output "${{ env.RELEASE_NAME }}-$version/" "/p:AssemblyVersion=$version" "/p:Version=$version" "/p:VersionSuffix=" "/p:ExtraDefineConstants=PRODUCTION_BUILD" -p:DebugType=None -p:DebugSymbols=false
+          $version = $env:RELEASE_VERSION
+          $output = "$env:RELEASE_NAME-$version"
+
+          dotnet publish SteamShortcut/SteamShortcut.csproj `
+            -p:PublishSingleFile=true `
+            --self-contained false `
+            --output "$output" `
+            -p:AssemblyVersion="$version" `
+            -p:Version="$version" `
+            -p:VersionSuffix="" `
+            -p:ExtraDefineConstants=PRODUCTION_BUILD `
+            -p:DebugType=None `
+            -p:DebugSymbols=false
+
       - name: Test
         run: dotnet test --no-restore --verbosity normal
-      - uses: vimtor/action-zip@v1
+
+      - name: Create portable ZIP
+        uses: vimtor/action-zip@v1
         with:
           files: ${{ env.RELEASE_NAME }}-${{ env.RELEASE_VERSION }}
           dest: ${{ env.RELEASE_NAME }}-${{ env.RELEASE_VERSION }}-portable.zip
           recursive: true
+
       - name: Update version in RELEASE.md
         shell: bash
         run: |
-          sed -i 's|#{GIT_TAG_NAME}|${{ env.RELEASE_VERSION }}|g' RELEASE.md
-      - uses: ncipollo/release-action@v1
+          sed -i "s|#{GIT_TAG_NAME}|${RELEASE_VERSION}|g" RELEASE.md
+
+      - name: Create GitHub Release
+        uses: ncipollo/release-action@v1
         with:
           tag: ${{ env.RELEASE_VERSION }}
           artifacts: "*.zip"
