@@ -23,13 +23,44 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
+      - name: Pin .NET 9 SDK
+        shell: pwsh
+        run: |
+          $sdk = dotnet --list-sdks |
+            Select-String '^9\.' |
+            Select-Object -Last 1
+
+          if (-not $sdk) {
+            throw "No .NET 9 SDK was installed."
+          }
+
+          $version = ($sdk.ToString() -split '\s+')[0]
+
+          @"
+          {
+            "sdk": {
+              "version": "$version",
+              "rollForward": "latestPatch",
+              "allowPrerelease": false
+            }
+          }
+          "@ | Set-Content global.json
+
+          Write-Host "Using .NET SDK $version"
+          dotnet --version
+
       - name: Install dependencies
         run: dotnet restore
 
       - name: Set release version
         shell: bash
         run: |
-          majorMinor=$(tr -d '[:space:]' < VERSION)
+          majorMinor=$(sed 's/^\xEF\xBB\xBF//' VERSION | tr -d '[:space:]')
+
+          if [[ ! "$majorMinor" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid VERSION file contents: '$majorMinor'"
+            exit 1
+          fi
 
           if ! git tag --list "${majorMinor}.*" | grep -q .; then
             nextVer="${majorMinor}.1"
@@ -51,19 +82,13 @@ jobs:
       - name: Validate variables
         shell: bash
         run: |
-          echo "RELEASE_VERSION: $RELEASE_VERSION"
-          echo "RELEASE_NAME: $RELEASE_NAME"
+          echo "RELEASE_VERSION: '$RELEASE_VERSION'"
+          echo "RELEASE_NAME: '$RELEASE_NAME'"
 
           if [ -z "$RELEASE_VERSION" ]; then
             echo "::error::RELEASE_VERSION is empty"
             exit 1
           fi
-
-      - name: Normalize version
-        shell: bash
-        run: |
-          clean_version=$(echo "$RELEASE_VERSION" | tr -d '[:space:]')
-          echo "RELEASE_VERSION=$clean_version" >> "$GITHUB_ENV"
 
       - name: Build Release
         shell: pwsh
